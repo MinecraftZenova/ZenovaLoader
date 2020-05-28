@@ -3,26 +3,42 @@
 #include <AclAPI.h>
 #include <Shlwapi.h>
 #include <Sddl.h>
+#include <stdio.h>
 
-#include "Utils/Utils.h"
 #include "ModLoader.h"
 
-DWORD ModLoader::AdjustGroupPolicy(std::wstring wstrFilePath) {
-	PACL pOldDACL = NULL, pNewDACL = NULL;
-	PSECURITY_DESCRIPTOR pSD = NULL;
+template<typename T>
+class unique_hlocal_ptr {
+	T ptr = NULL;
+
+public:
+	~unique_hlocal_ptr() {
+		if(ptr != NULL)
+			LocalFree((HLOCAL)ptr);
+	}
+
+	T& get() {
+		return ptr;
+	}
+};
+
+DWORD ModLoader::AdjustGroupPolicy(const wchar_t* wstrFilePath) {
+	PACL pOldDACL;
+	unique_hlocal_ptr<PACL> pNewDACL;
+	unique_hlocal_ptr<PSECURITY_DESCRIPTOR> pSD;
+	PSID pSID;
 	EXPLICIT_ACCESS_W eaAccess;
 	SECURITY_INFORMATION siInfo = DACL_SECURITY_INFORMATION;
 	DWORD dwResult = ERROR_SUCCESS;
-	PSID pSID;
 
 	// Get a pointer to the existing DACL (Conditionaly).
-	dwResult = GetNamedSecurityInfoW(wstrFilePath.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &pOldDACL, NULL, &pSD);
+	dwResult = GetNamedSecurityInfoW(wstrFilePath, SE_FILE_OBJECT, siInfo, NULL, NULL, &pOldDACL, NULL, &pSD.get());
 	if(dwResult != ERROR_SUCCESS)
-		goto Cleanup;
+		printf("GetNamedSecurityInfo Error %u\n", dwResult);
 
 	ConvertStringSidToSidW(L"S-1-15-2-1", &pSID);
 	if(pSID == NULL)
-		goto Cleanup;
+		printf("ConvertStringSidToSidW Error %u\n", GetLastError());
 
 	ZeroMemory(&eaAccess, sizeof(EXPLICIT_ACCESS_W));
 	eaAccess.grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
@@ -33,113 +49,74 @@ DWORD ModLoader::AdjustGroupPolicy(std::wstring wstrFilePath) {
 	eaAccess.Trustee.ptstrName = (LPWSTR)pSID;
 
 	// Create a new ACL that merges the new ACE into the existing DACL.
-	dwResult = SetEntriesInAclW(1, &eaAccess, pOldDACL, &pNewDACL);
+	dwResult = SetEntriesInAclW(1, &eaAccess, pOldDACL, &pNewDACL.get());
 	if(ERROR_SUCCESS != dwResult)
-		goto Cleanup;
+		printf("SetEntriesInAcl Error %u\n", dwResult);
 
 	// Attach the new ACL as the object's DACL.
-	dwResult = SetNamedSecurityInfoW((LPWSTR)wstrFilePath.c_str(), SE_FILE_OBJECT, siInfo, NULL, NULL, pNewDACL, NULL);
+	dwResult = SetNamedSecurityInfoW((LPWSTR)wstrFilePath, SE_FILE_OBJECT, siInfo, NULL, NULL, pNewDACL.get(), NULL);
 	if(ERROR_SUCCESS != dwResult)
-		goto Cleanup;
-
-Cleanup:
-	if(pSD != NULL)
-		LocalFree((HLOCAL)pSD);
-	if(pNewDACL != NULL)
-		LocalFree((HLOCAL)pNewDACL);
+		printf("SetNamedSecurityInfo Error %u\n", dwResult);
 
 	return dwResult;
 }
 
-BOOL ModLoader::InjectDLL(DWORD dwProcessId, std::wstring dllPath) {
-	BOOL status = TRUE;
+class unique_handle {
+	HANDLE mHandle = NULL;
 
+public:
+	unique_handle(HANDLE handle) : mHandle(handle) {}
+
+	~unique_handle() {
+		CloseHandle(mHandle);
+	}
+
+	HANDLE& get() {
+		return mHandle;
+	}
+};
+
+BOOL ModLoader::InjectDLL(DWORD dwProcessId, const wchar_t* dllPath) {
 	/* Open the process with all access */
-	HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwProcessId);
-	if(hProc == NULL) {
-		//if (Util::is_open()) Util::log(L"Could not open the process (" + std::to_wstring(dwProcessId) + L"), HRESULT: " + std::to_wstring(GetLastError()));
+	unique_handle hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwProcessId);
+	if(hProc.get() == NULL) {
+		printf("Could not open the process (%u) HRESULT: %u", dwProcessId, GetLastError());
 		return FALSE;
 	}
 
 	/* Allocate memory to hold the path to the DLL File in the process's memory */
-	dllPath += L'\0';
-	SIZE_T dllPathSize = dllPath.size() * sizeof(wchar_t);
-	LPVOID hRemoteMem = VirtualAllocEx(hProc, NULL, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	SIZE_T dllPathSize = wcslen(dllPath) * sizeof(wchar_t);
+	LPVOID hRemoteMem = VirtualAllocEx(hProc.get(), NULL, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 	if(hRemoteMem == NULL) {
-		//if (Util::is_open()) Util::log(L"Could not allocate memory in the process(" + std::to_wstring(dwProcessId) + L"), HRESULT: " + std::to_wstring(GetLastError()));
+		printf("Could not allocate memory in the process (%u) HRESULT: %u", dwProcessId, GetLastError());
 		return FALSE;
 	}
 
 	/* Write the path to the DLL File in the memory just allocated */
-	status = WriteProcessMemory(hProc, hRemoteMem, dllPath.c_str(), dllPathSize, NULL);
-	if(!status) {
-		//if (Util::is_open()) Util::log(L"Could not write memory in the process (" + std::to_wstring(dwProcessId) + L"), HRESULT: " + std::to_wstring(GetLastError()));
+	if(!WriteProcessMemory(hProc.get(), hRemoteMem, dllPath, dllPathSize, NULL)) {
+		printf("Could not write memory in the process (%u) HRESULT: %u", dwProcessId, GetLastError());
 		return FALSE;
 	}
 
 	/* Find the address of the LoadLibrary API */
 	HMODULE hLocKernel32 = GetModuleHandleW(L"Kernel32");
 	if(hLocKernel32 == NULL) {
-		//if (Util::is_open()) Util::log(L"Could not get a handle on Kernel32 in the process (" + std::to_wstring(dwProcessId) + L"), HRESULT: " + std::to_wstring(GetLastError()));
+		printf("Could not get a handle on Kernel32 in the process (%u) HRESULT: %u", dwProcessId, GetLastError());
 		return FALSE;
 	}
 
 	FARPROC hLocLoadLibrary = GetProcAddress(hLocKernel32, "LoadLibraryW");
 	if(hLocLoadLibrary == NULL) {
-		//if (Util::is_open()) Util::log(L"Could not find the locatin of LoadLibraryW in the process (" + std::to_wstring(dwProcessId) + L"), HRESULT: " + std::to_wstring(GetLastError()));
+		printf("Could not find the locatin of LoadLibraryW in the process (%u) HRESULT: %u", dwProcessId, GetLastError());
 		return FALSE;
 	}
 
 	/* Create a remote thread that invokes LoadLibrary for our DLL */
-	HANDLE hRemoteThread = CreateRemoteThread(hProc, NULL, 0, (LPTHREAD_START_ROUTINE)hLocLoadLibrary, hRemoteMem, 0, NULL);
-	if(hRemoteThread == NULL) {
-		//if (Util::is_open()) Util::log(L"Could not create a remote thread in the process (" + std::to_wstring(dwProcessId) + L"), HRESULT: " + std::to_wstring(GetLastError()));
+	unique_handle hRemoteThread = CreateRemoteThread(hProc.get(), NULL, 0, (LPTHREAD_START_ROUTINE)hLocLoadLibrary, hRemoteMem, 0, NULL);
+	if(hRemoteThread.get() == NULL) {
+		printf("Could not create a remote thread in the process (%u) HRESULT: %u", dwProcessId, GetLastError());
 		return FALSE;
 	}
-	
-	CloseHandle(hRemoteThread);
-	CloseHandle(hProc);
 
-	return status;
+	return TRUE;
 }
-
-HRESULT ModLoader::InjectMods(DWORD dwProcessId) {
-	std::wstring ModPath = Util::GetCommonFolder(FOLDERID_RoamingAppData) + L"\\Zenova";
-	//std::wstring ModPath = Util::GetCurrentDirectory() + L"\\Mods";
-	if(ModPath.length() == 0 || !PathFileExistsW(ModPath.c_str())) {
-		return E_FAIL;
-	}
-
-	HANDLE dir;
-	WIN32_FIND_DATAW fileData;
-
-	//std::cout << "\nMod List:\n";
-
-	if((dir = FindFirstFileW((ModPath + L"\\*").c_str(), &fileData)) == INVALID_HANDLE_VALUE)
-		return E_FAIL; /* No files found */
-
-	do {
-		const std::wstring fileName = fileData.cFileName;
-		const std::wstring filePath = ModPath + L"\\" + fileName;
-		const bool is_directory = (fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-
-		if(fileName[0] == '.')
-			continue;
-
-		if(is_directory)
-			continue;
-
-		if(fileName.rfind(L".dll") != fileName.npos) {
-			//std::wcout << fileName.c_str() << "\n";
-			ModLoader::AdjustGroupPolicy(filePath);
-			ModLoader::InjectDLL(dwProcessId, filePath.c_str());
-		}
-	} while(FindNextFileW(dir, &fileData));
-
-	FindClose(dir);
-
-	//std::cout << "\n";
-	//system("PAUSE");
-
-	return S_OK;
-};
