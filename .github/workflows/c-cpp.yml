@@ -1,0 +1,61 @@
+name: C/C++ CI
+
+on:
+  push:
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Git Checkout
+      uses: actions/checkout@v2
+
+    - name: Restore CMake Cache
+      uses: actions/cache@v2
+      with:
+        path: build/
+        key: ${{ runner.os }}-cxx-${{ hashFiles('**/CMakeLists.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-cxx-
+
+    - name: Checkout 'Common' Repository
+      uses: actions/checkout@v2
+      with:
+        repository: MinecraftZenova/Common
+        path: Common
+
+    - name: Setup Build Directory
+      run: mkdir build -ea 0
+      
+    - name: Set Git Tag
+      if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+      run: |
+        if("${{ github.ref }}" -match "refs\/tags\/([0-9]+\.[0-9]+\.[0-9]+)")
+        { echo ('::set-env name=GIT_TAG::'+$matches.1) }
+    
+    - name: Update Version Resource
+      if: env.GIT_TAG != null
+      run: |
+        (((Get-Content -path src/ZenovaLoader.rc -Raw) -replace "0,0,0", ("$env:GIT_TAG" -replace "\.", ",")) -replace "0\.0\.0", "$env:GIT_TAG") | Set-Content -Path src/ZenovaLoader.rc
+
+    - name: Run CMake
+      run: |
+        cmake -S . -B build
+        cmake --build build --config Release
+
+    - name: Upload x64 Build
+      uses: actions/upload-artifact@v2
+      with:
+        name: ZenovaLoader
+        path: build/Release/ZenovaLoader
+
+    - name: Create Tagged Release
+      if: env.GIT_TAG != null
+      uses: "marvinpinto/action-automatic-releases@latest"
+      with:
+        repo_token: "${{ secrets.GITHUB_TOKEN }}"
+        prerelease: false
+        files: build/Release/ZenovaLoader
