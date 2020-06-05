@@ -231,7 +231,10 @@ void AppUtils::AppDebugger::TerminateAllProcesses() {
 
 PACKAGE_EXECUTION_STATE AppUtils::AppDebugger::GetPackageExecutionState() {
 	hResult = E_FAIL;
-	if(debugSettings == NULL) return PES_UNKNOWN;
+	if(debugSettings == NULL) {
+		std::cout << "Debug Settings is null\n";
+		return PES_UNKNOWN;
+	}
 
 	PACKAGE_EXECUTION_STATE packageState = PES_UNKNOWN;
 	hResult = debugSettings->GetPackageExecutionState(PackageFullName.c_str(), &packageState);

@@ -33,12 +33,17 @@ DWORD ModLoader::AdjustGroupPolicy(const wchar_t* wstrFilePath) {
 
 	// Get a pointer to the existing DACL (Conditionaly).
 	dwResult = GetNamedSecurityInfoW(wstrFilePath, SE_FILE_OBJECT, siInfo, NULL, NULL, &pOldDACL, NULL, &pSD.get());
-	if(dwResult != ERROR_SUCCESS)
+	if(dwResult != ERROR_SUCCESS) {
 		printf("GetNamedSecurityInfo Error %u\n", dwResult);
+		return dwResult;
+	}
 
 	ConvertStringSidToSidW(L"S-1-15-2-1", &pSID);
-	if(pSID == NULL)
-		printf("ConvertStringSidToSidW Error %u\n", GetLastError());
+	if(pSID == NULL) {
+		DWORD error = GetLastError();
+		printf("ConvertStringSidToSidW Error %u\n", error);
+		return error;
+	}
 
 	ZeroMemory(&eaAccess, sizeof(EXPLICIT_ACCESS_W));
 	eaAccess.grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
@@ -50,13 +55,17 @@ DWORD ModLoader::AdjustGroupPolicy(const wchar_t* wstrFilePath) {
 
 	// Create a new ACL that merges the new ACE into the existing DACL.
 	dwResult = SetEntriesInAclW(1, &eaAccess, pOldDACL, &pNewDACL.get());
-	if(ERROR_SUCCESS != dwResult)
+	if(dwResult != ERROR_SUCCESS) {
 		printf("SetEntriesInAcl Error %u\n", dwResult);
+		return dwResult;
+	}
 
 	// Attach the new ACL as the object's DACL.
 	dwResult = SetNamedSecurityInfoW((LPWSTR)wstrFilePath, SE_FILE_OBJECT, siInfo, NULL, NULL, pNewDACL.get(), NULL);
-	if(ERROR_SUCCESS != dwResult)
+	if(dwResult != ERROR_SUCCESS) {
 		printf("SetNamedSecurityInfo Error %u\n", dwResult);
+		return dwResult;
+	}
 
 	return dwResult;
 }

@@ -26,7 +26,7 @@ void LaunchProcess(const std::string& app, const std::string& arg) {
 	// Start the child process.
 	if(!CreateProcessA(app.c_str(), const_cast<char*>(arg.c_str()), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
 		printf("CreateProcess failed (%d).\n", GetLastError());
-		throw std::exception("Could not create child process");
+		throw std::runtime_error("Could not create child process");
 	}
 	
 	WaitForSingleObject(pi.hProcess, INFINITE);
@@ -35,6 +35,48 @@ void LaunchProcess(const std::string& app, const std::string& arg) {
 }
 
 //#define CONSOLE_DEBUG
+
+#include <conio.h>
+
+class MessageManager {
+	FILE* console = nullptr;
+
+public:
+
+	MessageManager() {
+		AllocConsole();
+		
+		if(!console) {
+			//Handle std::cout, std::clog, std::cerr, std::cin
+			freopen_s(&console, "CONOUT$", "w", stdout);
+			freopen_s(&console, "CONOUT$", "w", stderr);
+			freopen_s(&console, "CONIN$", "r", stdin);
+		
+			HANDLE hConOut = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+			HANDLE hConIn = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+			SetStdHandle(STD_OUTPUT_HANDLE, hConOut);
+			SetStdHandle(STD_ERROR_HANDLE, hConOut);
+			SetStdHandle(STD_INPUT_HANDLE, hConIn);
+		
+			std::cout.clear();
+			std::clog.clear();
+			std::cerr.clear();
+			std::cin.clear();
+			std::wcout.clear();
+			std::wclog.clear();
+			std::wcerr.clear();
+			std::wcin.clear();
+		}
+	}
+
+	~MessageManager() {
+		FreeConsole();
+		if(console) {
+			fclose(console);
+		}
+	}
+};
+
 
 // Turning this into a normal Windows program hides the GUI
 int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
@@ -52,50 +94,39 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 		}
 	}
 
-//Maybe move MessageRedirection to Common and use it here?
 #ifdef CONSOLE_DEBUG
-	AllocConsole();
-	FILE* console = nullptr;
-	//Handle std::cout, std::clog, std::cerr, std::cin
-	freopen_s(&console, "CONOUT$", "w", stdout);
-	freopen_s(&console, "CONOUT$", "w", stderr);
-	freopen_s(&console, "CONIN$", "r", stdin);
-
-	HANDLE hConOut = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	HANDLE hConIn = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	SetStdHandle(STD_OUTPUT_HANDLE, hConOut);
-	SetStdHandle(STD_ERROR_HANDLE, hConOut);
-	SetStdHandle(STD_INPUT_HANDLE, hConIn);
-
-	std::cout.clear();
-	std::clog.clear();
-	std::cerr.clear();
-	std::cin.clear();
-	std::wcout.clear();
-	std::wclog.clear();
-	std::wcerr.clear();
-	std::wcin.clear();
-#endif // CONSOLE_DEBUG
+	MessageManager console;
+#endif
 
 	if(debug) {
 		std::cout << "Started with debug mode\n";
-		LaunchProcess("C:\\Windows\\System32\\vsjitdebugger.exe", " -p " + std::to_string(dwProcessId));
+		try {
+			LaunchProcess("C:\\Windows\\System32\\vsjitdebugger.exe", " -p " + std::to_string(dwProcessId));
+		}
+		catch(const std::exception& e) {
+			std::cout << "Exception: " << e.what() << "\n";
+		}
 	}
 
 	if(dwProcessId != 0 && SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED))) {
 		std::cout << "CoInitialize succeeded\n";
-		AppUtils::AppDebugger app(AppUtils::GetMinecraftPackageId());
+
+		std::wstring minecraftPID = AppUtils::GetMinecraftPackageId();
+		std::cout << Util::WstrToStr(minecraftPID) << "\n";
+
+		AppUtils::AppDebugger app(minecraftPID);
 
 		if(app.GetPackageExecutionState() == PES_UNKNOWN) {
+			std::cout << "App PES is unknown\n";
 			CoUninitialize();
 			return E_FAIL;
 		}
 
-		// Assume the game is suspended and inject mods
 		std::wstring zenovaPath = Util::StrToWstr(getenv("ZENOVA_DATA")) + L"\\ZenovaAPI.dll";
 		std::cout << "Path: " << Util::WstrToStr(zenovaPath) << "\n";
-		
-		ModLoader::AdjustGroupPolicy(zenovaPath.c_str());
+
+		//Assume the game is suspended and inject ZenovaAPI
+		//ModLoader::AdjustGroupPolicy(zenovaPath.c_str()); //not really needed seeing how ZenovaLauncher adjusts the group policy
 		ModLoader::InjectDLL(dwProcessId, zenovaPath.c_str());
 		
 		// Resume the game
@@ -104,11 +135,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 		CoUninitialize();
 	}
 
-	std::cout << "Gracefully exit\n";
-
-#ifdef CONSOLE_DEBUG
-	fclose(console);
-#endif // CONSOLE_DEBUG
+	std::cout << "Gracefully exit" << std::flush;
 
 	return S_OK;
 }
